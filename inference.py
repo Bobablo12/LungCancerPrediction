@@ -2,8 +2,12 @@ import os
 import json
 import numpy as np
 import tensorflow as tf
+import builtins as _builtins
 from keras.layers import Lambda as _KerasLambda
 from PIL import Image
+
+# Make `tf` visible to deserialized Lambda functions
+_builtins.tf = tf
 
 def _lambda_passthrough_compute_output_shape(self, input_shape):
     return input_shape
