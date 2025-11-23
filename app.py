@@ -9,7 +9,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image
 import numpy as np
 import tensorflow as tf
+import builtins as _builtins
 from keras.layers import Lambda as _KerasLambda
+
+# Make `tf` visible to deserialized Lambda functions
+_builtins.tf = tf
 
 # ----------------------------
 # Patch Lambda.compute_output_shape
@@ -59,6 +63,21 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/debug")
+def debug_inference():
+    try:
+        x = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+        preds = model.predict(x, verbose=0)
+        probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
+        top_idx = int(np.argmax(probs))
+        top_label = labels.get(str(top_idx), f"class_{top_idx}")
+        return {
+            "class": top_label,
+            "confidence": float(probs[top_idx])
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug inference failed: {e}")
 
 # ----------------------------
 # Image preprocessing
