@@ -2,19 +2,44 @@ import io
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image
+import numpy as np
+import tensorflow as tf
+import json
+from tensorflow import keras
 
-# Paths relative to this file
+# Paths
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = str(BASE_DIR / "model" / "lung_cancer_model_best.keras")
-LABELS_PATH = str(BASE_DIR / "model" / "labels.json")
+MODEL_PATH = BASE_DIR / "model" / "lung_cancer_model_best.keras"
+LABELS_PATH = BASE_DIR / "model" / "labels.json"
 IMG_SIZE = 300
 
+# FastAPI app
 app = FastAPI()
 
+# Enable Lambda deserialization
+keras.config.enable_unsafe_deserialization()
+
+# Load model
+try:
+    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+except Exception as e:
+    raise RuntimeError(f"Failed to load model at {MODEL_PATH}\n{e}")
+
+# Load labels
+with open(LABELS_PATH, "r") as f:
+    labels = json.load(f)
+
+# Root endpoint
+@app.get("/")
+def root():
+    return {"message": "Lung Cancer Prediction API is running!"}
+
+# Health endpoint
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+# Preprocess function
 def preprocess_pil(image: Image.Image):
     image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
     arr = np.array(image, dtype=np.float32)
@@ -22,6 +47,7 @@ def preprocess_pil(image: Image.Image):
     x = tf.expand_dims(x, 0)
     return x
 
+# Predict endpoint
 @app.post("/predict")
 async def predict_endpoint(file: UploadFile = File(...)):
     try:
@@ -48,3 +74,10 @@ async def predict_endpoint(file: UploadFile = File(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+# Run locally
+if __name__ == "__main__":
+    import os
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
