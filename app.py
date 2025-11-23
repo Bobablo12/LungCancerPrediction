@@ -1,6 +1,7 @@
 import io
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from PIL import Image
 
 # Paths relative to this file
 BASE_DIR = Path(__file__).resolve().parent
