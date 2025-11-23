@@ -17,6 +17,13 @@ import traceback
 # Make `tf` visible to deserialized Lambda functions
 _builtins.tf = tf
 
+# Reduce TF thread usage on small instances
+try:
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+except Exception:
+    pass
+
 # ----------------------------
 # Patch Lambda.compute_output_shape
 # ----------------------------
@@ -50,6 +57,12 @@ try:
     model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
 except Exception as e:
     raise RuntimeError(f"❌ Failed to load model at {MODEL_PATH}\n{e}")
+
+# Warm-up pass to allocate kernels/memory (helps avoid first-request spikes)
+try:
+    _ = model.predict(np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32), verbose=0)
+except Exception as _e:
+    logging.warning(f"Warm-up inference failed (continuing): {_e}")
 
 # Load labels
 with open(LABELS_PATH, "r") as f:
