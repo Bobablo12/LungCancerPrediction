@@ -11,6 +11,8 @@ import numpy as np
 import tensorflow as tf
 import builtins as _builtins
 from keras.layers import Lambda as _KerasLambda
+import logging
+import traceback
 
 # Make `tf` visible to deserialized Lambda functions
 _builtins.tf = tf
@@ -95,17 +97,23 @@ def preprocess_pil(image: Image.Image):
 async def predict_endpoint(file: UploadFile = File(...)):
     try:
         data = await file.read()
+        logging.info(f"/predict received bytes={len(data) if data else 0}, filename={file.filename}")
         if not data:
             raise HTTPException(status_code=400, detail="Empty file")
         image = Image.open(io.BytesIO(data))
+        logging.info(f"opened image mode={image.mode} size={getattr(image,'size',None)}")
         x = preprocess_pil(image)
+    except HTTPException:
+        raise
     except Exception as e:
+        logging.exception("Image decode/preprocess failed")
         raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
     try:
         preds = model.predict(x, verbose=0)
         probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
     except Exception as e:
+        logging.exception("Model inference failed")
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
     top_idx = int(np.argmax(probs))
