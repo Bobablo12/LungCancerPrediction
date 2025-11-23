@@ -30,7 +30,9 @@ with open(LABELS_PATH, "r") as f:
     labels = json.load(f)
 
 # Root endpoint
-
+@app.get("/")
+def root():
+    return {"message": "Lung Cancer Prediction API is running!"}
 
 # Health endpoint
 @app.get("/health")
