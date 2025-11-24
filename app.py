@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 app.py
-FastAPI server that rebuilds the same architecture and loads weights via model.load_weights(...)
-No SavedModel required.
+FastAPI server for Lung Cancer Prediction.
+Loads model weights via model.load_weights(...)
 """
 
 import os
@@ -12,13 +12,14 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-# ---- config (edit if needed) ----
+# ---- Config ----
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_WEIGHTS = BASE_DIR / "model" / "lung_cancer_model_best.keras"
 LABELS_PATH = BASE_DIR / "model" / "labels.json"
@@ -32,9 +33,10 @@ HEAD_DROPOUT = 0.35
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
-# logger
+# Logger
 logger = logging.getLogger("uvicorn.error")
 
+# ---- Build model ----
 def build_effnet_backbone(backbone='b3', img_size=IMG_SIZE, num_classes=NUM_CLASSES,
                           head_units=HEAD_UNITS, head_dropout=HEAD_DROPOUT):
     inp = keras.Input(shape=(img_size, img_size, 3), name='input_image', dtype=tf.float32)
@@ -68,16 +70,16 @@ def build_effnet_backbone(backbone='b3', img_size=IMG_SIZE, num_classes=NUM_CLAS
     model = keras.Model(inputs=inp, outputs=out, name=f"EffNet_{backbone}_head")
     return model
 
-# build model and load weights
+# Build model and load weights
 logger.info("Building model architecture...")
 model = build_effnet_backbone(BACKBONE, IMG_SIZE)
 if not MODEL_WEIGHTS.exists():
     raise RuntimeError(f"Model weights not found: {MODEL_WEIGHTS}")
 
-logger.info("Attempting to load weights into architecture from %s", MODEL_WEIGHTS)
+logger.info("Loading model weights from %s", MODEL_WEIGHTS)
 try:
     model.load_weights(str(MODEL_WEIGHTS))
-    logger.info("Weights loaded via model.load_weights()")
+    logger.info("Weights loaded successfully via model.load_weights()")
 except Exception as e:
     logger.warning("model.load_weights failed: %s. Trying fallback full-model load...", e)
     try:
@@ -85,10 +87,10 @@ except Exception as e:
         model.set_weights(full.get_weights())
         logger.info("Weights loaded from full-model fallback")
     except Exception as e2:
-        logger.exception("Failed to load weights by any method: %s", e2)
+        logger.exception("Failed to load weights: %s", e2)
         raise RuntimeError("Could not load model weights") from e2
 
-# ensure weights float32
+# Ensure weights are float32
 for w in model.weights:
     if w.dtype != tf.float32:
         try:
@@ -96,31 +98,32 @@ for w in model.weights:
         except Exception:
             tf.keras.backend.set_value(w, w.numpy().astype(np.float32))
 
-# load labels
-if Path(LABELS_PATH).exists():
+# Load labels
+if LABELS_PATH.exists():
     with open(LABELS_PATH, "r") as fh:
         labels = json.load(fh)
 else:
     labels = {}
 
-# create app
+# ---- Create FastAPI app ----
 app = FastAPI(title="Lung Cancer Prediction API")
 
-from fastapi.middleware.cors import CORSMiddleware
-
+# ---- CORS middleware (temporary for testing) ----
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://bc4afe70-2db6-4641-bc8d-53bfbae6d369.lovableproject.com"],
+    allow_origins=["*"],  # temporarily allow all origins; replace with your Lovable URL after testing
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---- Helpers ----
 def preprocess_pil(image: Image.Image):
     image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
-    arr = np.array(image, dtype=np.float32)  # 0..255
+    arr = np.array(image, dtype=np.float32)
     return np.expand_dims(arr, axis=0)
 
+# ---- Routes ----
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -132,12 +135,12 @@ async def predict_endpoint(file: UploadFile = File(...)):
         if not data:
             raise HTTPException(status_code=400, detail="Empty file")
         image = Image.open(io.BytesIO(data))
-        x = preprocess_pil(image)  # 0..255
+        x = preprocess_pil(image)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
     try:
-        preds = model.predict(x, verbose=0)[0]  # logits
+        preds = model.predict(x, verbose=0)[0]
         probs = tf.nn.softmax(preds).numpy()
     except Exception as e:
         logger.exception("Inference failed")
@@ -152,6 +155,7 @@ async def predict_endpoint(file: UploadFile = File(...)):
         "all_probabilities": { labels.get(str(i), f"class_{i}"): float(p) for i,p in enumerate(probs) }
     }
 
+# ---- Main ----
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
