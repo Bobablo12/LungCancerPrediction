@@ -106,6 +106,16 @@ else:
 # create app
 app = FastAPI(title="Lung Cancer Prediction API")
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://bc4afe70-2db6-4641-bc8d-53bfbae6d369.lovableproject.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 def preprocess_pil(image: Image.Image):
     image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
     arr = np.array(image, dtype=np.float32)  # 0..255
