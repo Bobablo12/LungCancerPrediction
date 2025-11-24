@@ -1,132 +1,136 @@
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Disable GPU
+#!/usr/bin/env python3
+"""
+app.py
+FastAPI server that rebuilds the same architecture and loads weights via model.load_weights(...)
+No SavedModel required.
+"""
 
+import os
 import io
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from PIL import Image
 import numpy as np
 import tensorflow as tf
-import builtins as _builtins
-from keras.layers import Lambda as _KerasLambda
-import logging
-import traceback
+from tensorflow import keras
+from tensorflow.keras import layers
 
-# Make `tf` visible to deserialized Lambda functions
-_builtins.tf = tf
-
-# Reduce TF thread usage on small instances
-try:
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-except Exception:
-    pass
-
-# ----------------------------
-# Patch Lambda.compute_output_shape
-# ----------------------------
-def _lambda_passthrough_compute_output_shape(self, input_shape):
-    return input_shape
-
-if not hasattr(_KerasLambda, "_cascade_patched"):
-    _KerasLambda.compute_output_shape = _lambda_passthrough_compute_output_shape
-    _KerasLambda._cascade_patched = True
-
-# ----------------------------
-# Paths and constants
-# ----------------------------
+# ---- config (edit if needed) ----
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "model" / "lung_cancer_model_best.keras"
+MODEL_WEIGHTS = BASE_DIR / "model" / "lung_cancer_model_best.keras"
 LABELS_PATH = BASE_DIR / "model" / "labels.json"
-IMG_SIZE = 300
 
-# ----------------------------
-# Initialize FastAPI
-# ----------------------------
+BACKBONE = "b3"
+IMG_SIZE = 300
+NUM_CLASSES = 3
+HEAD_UNITS = 512
+HEAD_DROPOUT = 0.35
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+# logger
+logger = logging.getLogger("uvicorn.error")
+
+def build_effnet_backbone(backbone='b3', img_size=IMG_SIZE, num_classes=NUM_CLASSES,
+                          head_units=HEAD_UNITS, head_dropout=HEAD_DROPOUT):
+    inp = keras.Input(shape=(img_size, img_size, 3), name='input_image', dtype=tf.float32)
+    x = layers.Rescaling(1.0/127.5, offset=-1.0, name="effnet_preprocess")(inp)
+
+    if backbone.lower() == 'b1':
+        Base = tf.keras.applications.EfficientNetB1
+        weights_file = "efficientnetb1_notop.h5"
+        weights_url = "https://storage.googleapis.com/keras-applications/efficientnetb1_notop.h5"
+    else:
+        Base = tf.keras.applications.EfficientNetB3
+        weights_file = "efficientnetb3_notop.h5"
+        weights_url = "https://storage.googleapis.com/keras-applications/efficientnetb3_notop.h5"
+
+    base = Base(include_top=False, weights=None, input_shape=(img_size, img_size, 3), pooling='avg')
+    try:
+        weights_path = tf.keras.utils.get_file(weights_file, origin=weights_url, cache_subdir="models")
+        base.load_weights(weights_path)
+    except Exception:
+        pass
+
+    base.trainable = False
+    feats = base(x, training=False)
+
+    h = layers.BatchNormalization()(feats)
+    h = layers.Dense(head_units, activation='relu', kernel_regularizer=keras.regularizers.l2(1e-5))(h)
+    h = layers.BatchNormalization()(h)
+    h = layers.Dropout(head_dropout)(h)
+    out = layers.Dense(num_classes, dtype='float32', name="logits")(h)
+
+    model = keras.Model(inputs=inp, outputs=out, name=f"EffNet_{backbone}_head")
+    return model
+
+# build model and load weights
+logger.info("Building model architecture...")
+model = build_effnet_backbone(BACKBONE, IMG_SIZE)
+if not MODEL_WEIGHTS.exists():
+    raise RuntimeError(f"Model weights not found: {MODEL_WEIGHTS}")
+
+logger.info("Attempting to load weights into architecture from %s", MODEL_WEIGHTS)
+try:
+    model.load_weights(str(MODEL_WEIGHTS))
+    logger.info("Weights loaded via model.load_weights()")
+except Exception as e:
+    logger.warning("model.load_weights failed: %s. Trying fallback full-model load...", e)
+    try:
+        full = tf.keras.models.load_model(str(MODEL_WEIGHTS), compile=False, safe_mode=False)
+        model.set_weights(full.get_weights())
+        logger.info("Weights loaded from full-model fallback")
+    except Exception as e2:
+        logger.exception("Failed to load weights by any method: %s", e2)
+        raise RuntimeError("Could not load model weights") from e2
+
+# ensure weights float32
+for w in model.weights:
+    if w.dtype != tf.float32:
+        try:
+            w.assign(tf.cast(w, tf.float32))
+        except Exception:
+            tf.keras.backend.set_value(w, w.numpy().astype(np.float32))
+
+# load labels
+if Path(LABELS_PATH).exists():
+    with open(LABELS_PATH, "r") as fh:
+        labels = json.load(fh)
+else:
+    labels = {}
+
+# create app
 app = FastAPI(title="Lung Cancer Prediction API")
 
-# Enable unsafe deserialization (for Lambda layers)
-tf.keras.config.enable_unsafe_deserialization()
-
-# ----------------------------
-# Load model
-# ----------------------------
-try:
-    model = tf.keras.models.load_model(MODEL_PATH, compile=False, safe_mode=False)
-except Exception as e:
-    raise RuntimeError(f"❌ Failed to load model at {MODEL_PATH}\n{e}")
-
-# Warm-up pass to allocate kernels/memory (helps avoid first-request spikes)
-try:
-    _ = model.predict(np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32), verbose=0)
-except Exception as _e:
-    logging.warning(f"Warm-up inference failed (continuing): {_e}")
-
-# Load labels
-with open(LABELS_PATH, "r") as f:
-    labels = json.load(f)
-
-# ----------------------------
-# Routes
-# ----------------------------
-@app.get("/")
-def root():
-    return {"message": "Lung Cancer Prediction API is running!"}
+def preprocess_pil(image: Image.Image):
+    image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+    arr = np.array(image, dtype=np.float32)  # 0..255
+    return np.expand_dims(arr, axis=0)
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-@app.get("/debug")
-def debug_inference():
-    try:
-        x = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
-        preds = model.predict(x, verbose=0)
-        probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
-        top_idx = int(np.argmax(probs))
-        top_label = labels.get(str(top_idx), f"class_{top_idx}")
-        return {
-            "class": top_label,
-            "confidence": float(probs[top_idx])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Debug inference failed: {e}")
-
-# ----------------------------
-# Image preprocessing
-# ----------------------------
-def preprocess_pil(image: Image.Image):
-    image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
-    arr = np.array(image, dtype=np.float32)
-    arr = np.expand_dims(arr, axis=0)  # shape: (1, H, W, 3)
-    return arr
-
-# ----------------------------
-# Predict endpoint
-# ----------------------------
 @app.post("/predict")
 async def predict_endpoint(file: UploadFile = File(...)):
     try:
         data = await file.read()
-        logging.info(f"/predict received bytes={len(data) if data else 0}, filename={file.filename}")
         if not data:
             raise HTTPException(status_code=400, detail="Empty file")
         image = Image.open(io.BytesIO(data))
-        logging.info(f"opened image mode={image.mode} size={getattr(image,'size',None)}")
-        x = preprocess_pil(image)
-    except HTTPException:
-        raise
+        x = preprocess_pil(image)  # 0..255
     except Exception as e:
-        logging.exception("Image decode/preprocess failed")
         raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
     try:
-        preds = model.predict(x, verbose=0)
-        probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
+        preds = model.predict(x, verbose=0)[0]  # logits
+        probs = tf.nn.softmax(preds).numpy()
     except Exception as e:
-        logging.exception("Model inference failed")
+        logger.exception("Inference failed")
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
     top_idx = int(np.argmax(probs))
@@ -135,15 +139,9 @@ async def predict_endpoint(file: UploadFile = File(...)):
     return {
         "class": top_label,
         "confidence": float(probs[top_idx]),
-        "all_probabilities": {
-            labels.get(str(i), f"class_{i}"): float(p)
-            for i, p in enumerate(probs)
-        }
+        "all_probabilities": { labels.get(str(i), f"class_{i}"): float(p) for i,p in enumerate(probs) }
     }
 
-# ----------------------------
-# Uvicorn entrypoint for Render
-# ----------------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
