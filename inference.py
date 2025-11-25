@@ -5,16 +5,42 @@ import tensorflow as tf
 import keras
 from PIL import Image
 
-# Enable Lambda deserialization (required for your model architecture)
-keras.config.enable_unsafe_deserialization()
+# Define custom objects for model loading
+def get_custom_objects():
+    """Define any custom objects used in the model."""
+    def swish_activation(x):
+        return x * tf.sigmoid(x)
+    
+    def identity(x):
+        return tf.identity(x)
+    
+    return {
+        'swish': swish_activation,
+        'swish_activation': swish_activation,
+        'identity': identity,
+        'tf': tf,
+    }
 
 MODEL_PATH = "model/lung_cancer_model_best2.keras"
 LABELS_PATH = "model/labels.json"
 IMG_SIZE = 300
 
-# Load model safely
+# Load model safely with custom objects
 try:
-    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    # Enable unsafe deserialization for Lambda layers
+    keras.config.enable_unsafe_deserialization()
+    
+    custom_objects = get_custom_objects()
+    model = tf.keras.models.load_model(
+        MODEL_PATH,
+        compile=False,
+        custom_objects=custom_objects
+    )
+    
+    # Test model with a dummy input to catch shape issues early
+    test_input = tf.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=tf.float32)
+    _ = model.predict(test_input, verbose=0)
+    
 except Exception as e:
     raise RuntimeError(f"\n❌ Failed to load model at {MODEL_PATH}\n{e}")
 
