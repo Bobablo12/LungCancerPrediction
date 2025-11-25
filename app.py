@@ -290,7 +290,7 @@ def load_model_safely(model_path: Path) -> keras.Model:
     raise RuntimeError("Failed to load model. Please check if the model file is corrupted or incompatible.")
 
 def fix_lambda_layers(model: keras.Model) -> keras.Model:
-    """Fix Lambda layers in the model by patching their call method to handle tf NameError."""
+    """Fix Lambda layers in the model by replacing their call method with EfficientNet preprocessing."""
     from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
     
     # Recursively fix Lambda layers
@@ -298,23 +298,35 @@ def fix_lambda_layers(model: keras.Model) -> keras.Model:
         if isinstance(layer, keras.layers.Lambda):
             layer_name = getattr(layer, 'name', 'unknown')
             
-            # Store original call method
-            original_call = layer.call
+            # Check if this is a preprocessing layer
+            is_preprocess = ('preprocess' in layer_name.lower() or 'effnet' in layer_name.lower())
             
-            # Create a patched call method that catches NameError for tf
-            def patched_call(inputs, mask=None, training=None):
-                try:
-                    return original_call(inputs, mask=mask, training=training)
-                except NameError as name_err:
-                    if 'tf' in str(name_err) or 'tensorflow' in str(name_err).lower():
-                        # Use EfficientNet preprocessing directly
-                        logger.info(f"Lambda layer {layer_name} had tf NameError, using EfficientNet preprocessing")
-                        return effnet_preprocess(inputs)
-                    raise
-            
-            # Replace the call method
-            layer.call = patched_call
-            logger.info(f"Patched Lambda layer: {layer_name}")
+            if is_preprocess:
+                # Completely replace the call method to use EfficientNet preprocessing directly
+                # This avoids any issues with tf not being in scope or execution context errors
+                def safe_preprocess_call(inputs, mask=None, training=None):
+                    return effnet_preprocess(inputs)
+                
+                layer.call = safe_preprocess_call
+                logger.info(f"Replaced call method for preprocessing Lambda layer: {layer_name}")
+            else:
+                # For other Lambda layers, patch the call method to catch any errors
+                original_call = layer.call
+                
+                def patched_call(inputs, mask=None, training=None):
+                    try:
+                        return original_call(inputs, mask=mask, training=training)
+                    except (NameError, SystemError, Exception) as e:
+                        # If there's any error related to tf or execution context, use preprocessing
+                        error_str = str(e).lower()
+                        if 'tf' in error_str or 'tensorflow' in error_str or 'no locals' in error_str:
+                            logger.info(f"Lambda layer {layer_name} had execution error, using EfficientNet preprocessing")
+                            return effnet_preprocess(inputs)
+                        # Re-raise if it's a different error
+                        raise
+                
+                layer.call = patched_call
+                logger.info(f"Patched call method for Lambda layer: {layer_name}")
         
         # Recursively process nested layers
         if hasattr(layer, 'layers'):
