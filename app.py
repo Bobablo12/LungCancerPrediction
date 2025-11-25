@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 
 # ---------------- LOAD MODEL ----------------
 try:
-    # Load original model WITHOUT Lambda preprocessing
-    base_model = keras.models.load_model(str(MODEL_PATH), compile=False)
+    # Load the model even though it contains a Lambda layer
+    base_model = keras.models.load_model(
+        str(MODEL_PATH),
+        compile=False,
+        safe_mode=False   # <--- FIXED HERE
+    )
     
     # Wrap it with external preprocessing
     inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="input_image")
