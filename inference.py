@@ -8,7 +8,7 @@ from PIL import Image
 # Enable Lambda deserialization (required for your model architecture)
 keras.config.enable_unsafe_deserialization()
 
-MODEL_PATH = "model/lung_cancer_model_best.keras"
+MODEL_PATH = "model/lung_cancer_model_best2.keras"
 LABELS_PATH = "model/labels.json"
 IMG_SIZE = 300
 
