@@ -4,7 +4,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 
 # Paths relative to this file
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = str(BASE_DIR / "model" / "lung_cancer_model_best.keras")
+MODEL_PATH = str(BASE_DIR / "model" / "lung_cancer_model_best2.keras")
 LABELS_PATH = str(BASE_DIR / "model" / "labels.json")
 IMG_SIZE = 300
 
