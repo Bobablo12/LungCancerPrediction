@@ -1,74 +1,151 @@
+import os
 import io
+import logging
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import tensorflow as tf
-from tensorflow import keras
+from typing import Dict, Any
+
 import numpy as np
 from PIL import Image
-import json
-import logging
+import tensorflow as tf
+from tensorflow import keras
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-# ---------------- CONFIG ----------------
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "model" / "lung_cancer_model_best2.keras"
-LABELS_PATH = BASE_DIR / "model" / "labels.json"
-IMG_SIZE = 300
-
-# Setup logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- LOAD MODEL ----------------
+# Constants
+IMG_SIZE = 300
+MODEL_DIR = Path("model")
+MODEL_PATH = MODEL_DIR / "lung_cancer_model_best2.keras"
+LABELS_PATH = MODEL_DIR / "labels.json"
+
+# Disable GPU to avoid CUDA issues
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+# Initialize FastAPI app
+app = FastAPI(title="Lung Cancer Detection API")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Custom layer definitions
+class Swish(keras.layers.Layer):
+    def call(self, inputs):
+        return inputs * tf.sigmoid(inputs)
+
+# Define custom objects
+custom_objects = {
+    'Swish': Swish,
+    'swish': Swish(),
+    'tf': tf,
+}
+
+def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model:
+    """Attempt to load model with retries and different strategies."""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt + 1} to load model...")
+            
+            # Try different loading strategies
+            if attempt == 0:
+                # First try with safe_mode=False
+                model = keras.models.load_model(
+                    str(model_path),
+                    compile=False,
+                    custom_objects=custom_objects,
+                    safe_mode=False
+                )
+            elif attempt == 1:
+                # Try with a fresh session
+                tf.keras.backend.clear_session()
+                model = keras.models.load_model(
+                    str(model_path),
+                    compile=False,
+                    custom_objects=custom_objects
+                )
+            else:
+                # Final attempt with tensorflow.compat.v1
+                import tensorflow.compat.v1 as tf1
+                tf1.disable_v2_behavior()
+                model = tf1.keras.models.load_model(
+                    str(model_path),
+                    compile=False,
+                    custom_objects=custom_objects
+                )
+            
+            # Test the model
+            test_input = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+            _ = model.predict(test_input, verbose=0)
+            return model
+            
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+
+def load_labels() -> Dict[str, str]:
+    """Load class labels from JSON file."""
+    if not LABELS_PATH.exists():
+        raise FileNotFoundError(f"Labels file not found: {LABELS_PATH}")
+    with open(LABELS_PATH, "r") as f:
+        return {str(k): str(v) for k, v in json.load(f).items()}
+
+# Load the model and labels
 try:
-    # Load the model even though it contains a Lambda layer
-    base_model = keras.models.load_model(
-        str(MODEL_PATH),
-        compile=False,
-        safe_mode=False   # <--- FIXED HERE
-    )
+    logger.info("Loading model...")
+    model = load_model_with_retry(MODEL_PATH)
+    logger.info("✅ Model loaded successfully!")
     
-    # Wrap it with external preprocessing
-    inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="input_image")
-    x = tf.keras.applications.efficientnet.preprocess_input(inputs)
-    outputs = base_model(x)
-    model = tf.keras.Model(inputs, outputs)
+    # Wrap with preprocessing if needed
+    inputs = keras.layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="input_image")
+    x = inputs
+    if not isinstance(model.layers[0], keras.layers.InputLayer):
+        x = keras.applications.efficientnet.preprocess_input(inputs)
+    outputs = model(x)
+    model = keras.Model(inputs, outputs)
     
-    # Test model with dummy input
-    test_input = tf.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=tf.float32)
+    # Test the final model
+    test_input = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
     _ = model.predict(test_input, verbose=0)
-    
-    logger.info(f"✅ Model loaded from {MODEL_PATH} with external preprocessing")
+    logger.info("✅ Model test prediction successful!")
+
+    # Load labels
+    labels = load_labels()
+    logger.info(f"✅ Loaded {len(labels)} class labels")
+
 except Exception as e:
-    logger.exception(f"❌ Failed to load model: {e}")
-    raise RuntimeError(f"Failed to load model at {MODEL_PATH}") from e
+    logger.error(f"❌ Failed to initialize model: {str(e)}")
+    logger.error("Please check the model file and try again")
+    raise
 
-# ---------------- LOAD LABELS ----------------
-if not LABELS_PATH.exists():
-    raise FileNotFoundError(f"Labels file not found: {LABELS_PATH}")
-with open(LABELS_PATH, "r") as f:
-    labels = json.load(f)
-logger.info(f"✅ Labels loaded from {LABELS_PATH}")
+def preprocess_image(image: Image.Image) -> tf.Tensor:
+    """Preprocess image for model inference."""
+    # Convert to RGB if not already
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Resize and convert to array
+    image = image.resize((IMG_SIZE, IMG_SIZE))
+    image_array = np.array(image, dtype=np.float32)
+    
+    # Add batch dimension
+    return tf.expand_dims(image_array, axis=0)
 
-# ---------------- INIT APP ----------------
-app = FastAPI(title="Lung Cancer Prediction API", version="1.0")
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# ---------------- HELPERS ----------------
-def preprocess_pil(image: Image.Image) -> tf.Tensor:
-    """Preprocess PIL image to tensor for EfficientNet input."""
-    image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
-    arr = np.array(image, dtype=np.float32)
-    x = tf.convert_to_tensor(arr, dtype=tf.float32)
-    x = tf.expand_dims(x, axis=0)  # shape (1, H, W, 3)
-    return x
-
-def run_inference(x: tf.Tensor) -> dict:
-    """Run model inference and return top class + probabilities."""
-    preds = model.predict(x, verbose=0)
+def run_inference(image_tensor: tf.Tensor) -> Dict[str, Any]:
+    """Run model inference on a single image."""
+    # Get predictions
+    preds = model.predict(image_tensor, verbose=0)
     probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
+    
+    # Get top prediction
     top_idx = int(np.argmax(probs))
     top_label = labels.get(str(top_idx), f"class_{top_idx}")
     
@@ -76,28 +153,44 @@ def run_inference(x: tf.Tensor) -> dict:
         "class": top_label,
         "confidence": float(probs[top_idx]),
         "all_probabilities": {
-            labels.get(str(i), f"class_{i}"): float(p) for i, p in enumerate(probs)
+            labels.get(str(i), f"class_{i}"): float(p) 
+            for i, p in enumerate(probs)
         }
     }
 
-# ---------------- ROUTES ----------------
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "message": "Lung Cancer Detection API is running",
+        "model_loaded": model is not None
+    }
+
 @app.post("/predict")
-async def predict_endpoint(file: UploadFile = File(...)):
+async def predict(file: UploadFile = File(...)):
+    """Predict the class of an uploaded image."""
     if not file:
         raise HTTPException(status_code=400, detail="No file uploaded")
     
     try:
-        data = await file.read()
-        if not data:
+        # Read and validate image
+        contents = await file.read()
+        if not contents:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
-        image = Image.open(io.BytesIO(data))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
-    
-    try:
-        x = preprocess_pil(image)
-        result = run_inference(x)
+        
+        image = Image.open(io.BytesIO(contents))
+        
+        # Preprocess and run inference
+        image_tensor = preprocess_image(image)
+        result = run_inference(image_tensor)
+        
         return result
+        
     except Exception as e:
-        logger.exception(f"Inference failed: {e}")
-        raise HTTPException(status_code=500, detail="Inference failed")
+        logger.exception("Prediction failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
