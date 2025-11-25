@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Any
@@ -24,6 +25,9 @@ LABELS_PATH = MODEL_DIR / "labels.json"
 # Disable GPU to avoid CUDA issues
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
+# Enable unsafe deserialization for Lambda layers
+tf.keras.config.enable_unsafe_deserialization()
+
 # Initialize FastAPI app
 app = FastAPI(title="Lung Cancer Detection API")
 
@@ -41,11 +45,15 @@ class Swish(keras.layers.Layer):
     def call(self, inputs):
         return inputs * tf.sigmoid(inputs)
 
-# Define custom objects
+# Define custom objects with common activation functions
 custom_objects = {
     'Swish': Swish,
     'swish': Swish(),
     'tf': tf,
+    'keras': keras,
+    'relu': tf.keras.activations.relu,
+    'sigmoid': tf.keras.activations.sigmoid,
+    'softmax': tf.keras.activations.softmax,
 }
 
 def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model:
@@ -54,9 +62,12 @@ def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model
         try:
             logger.info(f"Attempt {attempt + 1} to load model...")
             
-            # Try different loading strategies
+            # Clear any existing session
+            tf.keras.backend.clear_session()
+            
+            # Try loading with different strategies
             if attempt == 0:
-                # First try with safe_mode=False
+                # First try with safe_mode=False and custom_objects
                 model = keras.models.load_model(
                     str(model_path),
                     compile=False,
@@ -64,8 +75,7 @@ def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model
                     safe_mode=False
                 )
             elif attempt == 1:
-                # Try with a fresh session
-                tf.keras.backend.clear_session()
+                # Try with a fresh session and basic config
                 model = keras.models.load_model(
                     str(model_path),
                     compile=False,
@@ -81,7 +91,7 @@ def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model
                     custom_objects=custom_objects
                 )
             
-            # Test the model
+            # Test the model with a dummy input
             test_input = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
             _ = model.predict(test_input, verbose=0)
             return model
@@ -89,6 +99,7 @@ def load_model_with_retry(model_path: Path, max_retries: int = 3) -> keras.Model
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt == max_retries - 1:
+                logger.error("All loading attempts failed. Please check the model file and try again.")
                 raise
 
 def load_labels() -> Dict[str, str]:
@@ -123,7 +134,6 @@ try:
 
 except Exception as e:
     logger.error(f"❌ Failed to initialize model: {str(e)}")
-    logger.error("Please check the model file and try again")
     raise
 
 def preprocess_image(image: Image.Image) -> tf.Tensor:
