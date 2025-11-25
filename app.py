@@ -20,25 +20,25 @@ logger = logging.getLogger(__name__)
 
 # ---------------- LOAD MODEL ----------------
 try:
-    # No Lambda inside, preprocess will happen outside
-    keras.config.enable_unsafe_deserialization()  # keep for safety
-    model = keras.models.load_model(str(MODEL_PATH), compile=False)
+    # Load original model WITHOUT Lambda preprocessing
+    base_model = keras.models.load_model(str(MODEL_PATH), compile=False)
     
-    # Ensure weights are float32
-    for w in model.weights:
-        if w.dtype != tf.float32:
-            w.assign(tf.cast(w, tf.float32))
+    # Wrap it with external preprocessing
+    inputs = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name="input_image")
+    x = tf.keras.applications.efficientnet.preprocess_input(inputs)
+    outputs = base_model(x)
+    model = tf.keras.Model(inputs, outputs)
     
-    # Dummy test
+    # Test model with dummy input
     test_input = tf.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=tf.float32)
     _ = model.predict(test_input, verbose=0)
-
-    logger.info(f"✅ Model loaded from {MODEL_PATH}")
+    
+    logger.info(f"✅ Model loaded from {MODEL_PATH} with external preprocessing")
 except Exception as e:
     logger.exception(f"❌ Failed to load model: {e}")
     raise RuntimeError(f"Failed to load model at {MODEL_PATH}") from e
 
-# Load labels
+# ---------------- LOAD LABELS ----------------
 if not LABELS_PATH.exists():
     raise FileNotFoundError(f"Labels file not found: {LABELS_PATH}")
 with open(LABELS_PATH, "r") as f:
@@ -53,18 +53,16 @@ def health():
     return {"status": "ok"}
 
 # ---------------- HELPERS ----------------
-from tensorflow.keras.applications.efficientnet import preprocess_input
-
-def preprocess_pil(image: Image.Image) -> np.ndarray:
-    """Preprocess PIL image for EfficientNet (moved outside model)."""
+def preprocess_pil(image: Image.Image) -> tf.Tensor:
+    """Preprocess PIL image to tensor for EfficientNet input."""
     image = image.convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
     arr = np.array(image, dtype=np.float32)
-    arr = preprocess_input(arr)  # preprocess here
-    arr = np.expand_dims(arr, axis=0)  # shape (1, H, W, 3)
-    return arr
+    x = tf.convert_to_tensor(arr, dtype=tf.float32)
+    x = tf.expand_dims(x, axis=0)  # shape (1, H, W, 3)
+    return x
 
-def run_inference(x: np.ndarray) -> dict:
-    """Run inference and return class + probabilities."""
+def run_inference(x: tf.Tensor) -> dict:
+    """Run model inference and return top class + probabilities."""
     preds = model.predict(x, verbose=0)
     probs = tf.nn.softmax(preds, axis=-1).numpy()[0]
     top_idx = int(np.argmax(probs))
