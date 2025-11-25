@@ -19,17 +19,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------- LOAD MODEL ----------------
+def get_custom_objects():
+    """Define any custom objects used in the model."""
+    def swish_activation(x):
+        return x * tf.sigmoid(x)
+    
+    def identity(x):
+        return tf.identity(x)
+    
+    return {
+        'swish': swish_activation,
+        'swish_activation': swish_activation,
+        'identity': identity,
+        'tf': tf,
+    }
+
 try:
     # Enable unsafe deserialization for Lambda layers
     keras.config.enable_unsafe_deserialization()
     
-    # Load model without compilation
-    model = keras.models.load_model(str(MODEL_PATH), compile=False)
+    # Load model with custom objects
+    custom_objects = get_custom_objects()
+    model = keras.models.load_model(
+        str(MODEL_PATH),
+        compile=False,
+        custom_objects=custom_objects
+    )
     
     # Ensure all weights are float32 (avoid precision issues)
     for w in model.weights:
         if w.dtype != tf.float32:
             w.assign(tf.cast(w, tf.float32))
+    
+    # Test model with a dummy input to catch shape issues early
+    test_input = tf.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=tf.float32)
+    _ = model.predict(test_input, verbose=0)
     
     logger.info(f"✅ Model loaded from {MODEL_PATH}")
 except Exception as e:
